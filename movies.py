@@ -158,7 +158,7 @@ def process_movie_item(page, item_page_url, cat_type):
     if not movie_title:
         return
 
-    # 1. التحقق مسبقاً من قاعدة البيانات هل الفيلم موجود وله روابط؟
+    # التحقق مسبقاً من قاعدة البيانات هل الفيلم موجود وله روابط؟
     try:
         existing_movie = supabase.table("movies_cima").select("watch_url, direct_links").eq("title", movie_title).execute()
         if existing_movie.data:
@@ -167,16 +167,14 @@ def process_movie_item(page, item_page_url, cat_type):
             direct = row.get("direct_links") or {}
             has_download = bool(direct.get("download_links"))
             
-            # لو الفيلم موجود وله روابط مشاهدة وتحميل، نتخطاه فوراً
             if has_watch and has_download:
-                print(ف"    ⏭️ الفيلم موجود مسبقاً وله روابط كاملة، تم التخطي: {movie_title}")
+                print(f"    ⏭️ الفيلم موجود مسبقاً وله روابط كاملة، تم التخطي: {movie_title}")
                 return
     except Exception:
         pass
         
     print(f"    🎬 معالجة فيلم جديد أو تنشيط روابطه: {movie_title}")
 
-    # استخراج البوستر من الصفحة مباشرة، وإذا لم يوجد يتم الاعتماد على TMDB
     poster = extract_poster_url(page)
     if poster == "غير متوفر" or not poster.startswith("http"):
         poster = get_tmdb_poster(movie_title)
