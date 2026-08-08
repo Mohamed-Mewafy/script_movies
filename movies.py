@@ -29,65 +29,6 @@ def clean_title(raw_title):
     title = title.split("|")[0].split("-")[0]
     return clean_text(title)
 
-def extract_series_name_from_title(raw_title):
-    if not raw_title:
-        return ""
-    # إزالة الكلمات الافتتاحية
-    name = re.sub(r'^(مشاهدة|تحميل)?\s*(مسلسل|انمي|برنامج)?\s*', '', raw_title).strip()
-    # قص النص عند بداية ذكر الموسم، الحلقة، أو الكلمات الزائدة
-    name = re.sub(r'\s*(الموسم|الحلقة|مترجم|مدبلج|اكوام|Akwam|-|\|).*', '', name, flags=re.IGNORECASE).strip()
-    return clean_text(name)
-
-def extract_season_and_episode(text):
-    season_num = 1
-    episode_num = 1
-    
-    # قاموس لتحويل الأرقام المكتوبة بالعربي إلى أرقام صحيحة
-    arabic_numbers = {
-        "الاول": 1, "الأول": 1,
-        "الثاني": 2, "التاني": 2,
-        "الثالث": 3, "التالت": 3,
-        "الرابع": 4,
-        "الخامس": 5,
-        "السادس": 6,
-        "السابع": 7,
-        "الثامن": 8,
-        "التاسع": 9,
-        "العاشر": 10
-    }
-    
-    # 1. البحث عن الرقم العادي (مثل: الموسم 3)
-    season_match = re.search(r'(?:الموسم|Season)\s*(\d+)', text, re.IGNORECASE)
-    if season_match:
-        try:
-            season_num = int(season_match.group(1))
-        except Exception:
-            pass
-    else:
-        # 2. البحث عن الرقم المكتوب كنص عربي (مثل: الموسم الثالث)
-        season_word_match = re.search(r'(?:الموسم|Season)\s*([أ-ي]+)', text, re.IGNORECASE)
-        if season_word_match:
-            word = season_word_match.group(1)
-            if word in arabic_numbers:
-                season_num = arabic_numbers[word]
-                
-    # استخراج رقم الحلقة
-    episode_match = re.search(r'(?:الحلقة|Episode)\s*(\d+)', text, re.IGNORECASE)
-    if episode_match:
-        try:
-            episode_num = int(episode_match.group(1))
-        except Exception:
-            pass
-    else:
-        # احتياطي لو رقم الحلقة مكتوب بالعربي برضه
-        ep_word_match = re.search(r'(?:الحلقة|Episode)\s*([أ-ي]+)', text, re.IGNORECASE)
-        if ep_word_match:
-            word = ep_word_match.group(1)
-            if word in arabic_numbers:
-                episode_num = arabic_numbers[word]
-                
-    return season_num, episode_num
-
 def shorten_link_via_shrinkme(original_url):
     if not original_url:
         return original_url
@@ -232,11 +173,28 @@ def process_movie_item(page, item_page_url):
 
     print(f"    🎬 فيلم: {title}")
 
-    existing = supabase.table("movies_cima").select("id").eq("title", title).execute()
-    if existing.data:
-        print(f"    ⏭️ الفيلم موجود مسبقاً. تم التخطّي.")
-        return
+    # 1. الاستعلام عن الفيلم مع جلب الروابط للتأكد من وجودها
+    existing = supabase.table("movies_cima").select("id, watch_url, direct_links").eq("title", title).execute()
 
+    if existing.data:
+        movie_record = existing.data[0]
+        watch_url = movie_record.get("watch_url")
+        direct_links = movie_record.get("direct_links") or {}
+        
+        streaming_links = direct_links.get("streaming_links", [])
+        download_links = direct_links.get("download_links", [])
+
+        # التحقق من اكتمال الروابط
+        has_watch = bool(watch_url) or bool(streaming_links)
+        has_download = bool(download_links)
+
+        if has_watch and has_download:
+            print(f"    ⏭️ الفيلم وروابطه موجودة مسبقاً. تم التخطّي.")
+            return
+        else:
+            print(f"    🔄 الفيلم موجود ولكن الروابط ناقصة.. جاري سحب الروابط وتحديثها...")
+
+    # 2. سحب الروابط من الصفحة
     extracted_streaming_links = fetch_streaming_links_with_clicking(page, item_page_url)
     final_watch_url = extracted_streaming_links[0] if extracted_streaming_links else None
     extracted_download_links = fetch_download_links_only(page, item_page_url)
@@ -246,6 +204,21 @@ def process_movie_item(page, item_page_url):
         "download_links": extracted_download_links
     }
 
+    # 3. تحديث البيانات فقط إذا كان الفيلم موجوداً والروابط ناقصة
+    if existing.data:
+        movie_id = existing.data[0]["id"]
+        update_data = {
+            "watch_url": final_watch_url or existing.data[0].get("watch_url"),
+            "direct_links": direct_links_json
+        }
+        try:
+            supabase.table("movies_cima").update(update_data).eq("id", movie_id).execute()
+            print(f"    ✅ [تم تحديث روابط الفيلم بنجاح]")
+        except Exception as e:
+            print(f"    ❌ خطأ أثناء تحديث روابط الفيلم: {e}")
+        return
+
+    # 4. إضافة الفيلم كعنصر جديد في حال عدم وجوده مطلقاً
     year = None
     match = re.search(r'20\d{2}|19\d{2}', title)
     if match:
@@ -279,94 +252,12 @@ def process_movie_item(page, item_page_url):
 
     try:
         supabase.table("movies_cima").insert(formatted_movie).execute()
-        print(f"    ✅ [تم حفظ الفيلم بنجاح]")
+        print(f"    ✅ [تم حفظ الفيلم الجديد بنجاح]")
     except Exception as e:
         print(f"    ❌ خطأ أثناء حفظ الفيلم: {e}")
 
-def process_series_item(page, item_page_url):
-    try:
-        page.goto(item_page_url, wait_until="domcontentloaded", timeout=15000)
-    except Exception as e:
-        return
-
-    raw_page_title = ""
-    try:
-        raw_page_title = page.title()
-    except Exception:
-        pass
-
-    if not raw_page_title or "الصفحة الرئيسية" in raw_page_title or "تسجيل الدخول" in raw_page_title:
-        return
-
-    series_name = extract_series_name_from_title(raw_page_title)
-
-    if not series_name or len(series_name) < 2:
-        print(f"    ⚠️ تعذر استخراج اسم المسلسل من الرابط. سيتم تخطي الرابط: {item_page_url}")
-        return
-
-    season_number, episode_number = extract_season_and_episode(raw_page_title)
-
-    try:
-        existing_series = supabase.table("tv_series").select("id").ilike("title", f"%{series_name}%").execute()
-        if existing_series.data:
-            s_id = existing_series.data[0]["id"]
-            existing_ep = supabase.table("episodes_cima").select("id").eq("series_id", s_id).eq("season_number", season_number).eq("episode_number", episode_number).execute()
-            if existing_ep.data:
-                print(f"    ⏭️ [تخطي سريع]: {series_name} - موسم {season_number} حلقة {episode_number} مسجل مسبقاً.")
-                return
-    except Exception:
-        pass
-
-    print(f"    📺 جاري معالجة: {series_name} | موسم {season_number} - حلقة {episode_number}")
-
-    series_id = None
-    try:
-        existing_series = supabase.table("tv_series").select("id, title").ilike("title", f"%{series_name}%").execute()
-        if existing_series.data:
-            series_id = existing_series.data[0]["id"]
-            series_name = existing_series.data[0]["title"]
-        else:
-            poster = get_tmdb_poster(series_name)
-            new_series_data = {
-                "title": series_name,
-                "poster_url": poster,
-                "category_type": "مسلسلات اجنبي"
-            }
-            res = supabase.table("tv_series").insert(new_series_data).execute()
-            if res.data:
-                series_id = res.data[0]["id"]
-    except Exception as e:
-        return
-
-    if not series_id:
-        return
-
-    extracted_streaming_links = fetch_streaming_links_with_clicking(page, item_page_url)
-    final_watch_url = extracted_streaming_links[0] if extracted_streaming_links else None
-    extracted_download_links = fetch_download_links_only(page, item_page_url)
-
-    direct_links_json = {
-        "streaming_links": extracted_streaming_links,
-        "download_links": extracted_download_links
-    }
-
-    episode_data = {
-        "series_id": series_id,
-        "title": f"الحلقة {episode_number}",
-        "season_number": season_number,
-        "episode_number": episode_number,
-        "watch_url": final_watch_url,
-        "direct_links": direct_links_json
-    }
-
-    try:
-        supabase.table("episodes_cima").insert(episode_data).execute()
-        print(f"    ✅ [تم حفظ الحلقة بنجاح]")
-    except Exception as e:
-        print(f"    ❌ خطأ أثناء حفظ الحلقة: {e}")
-
-def scrape_section(page, base_category_url, section_type):
-    print(f"\n🚀 بدء سحب القسم بلا حدود: {base_category_url}")
+def scrape_section(page, base_category_url):
+    print(f"\n🚀 بدء سحب قسم الأفلام بلا حدود: {base_category_url}")
     page_number = 1
     global_processed_links = set()
     
@@ -408,10 +299,7 @@ def scrape_section(page, base_category_url, section_type):
             
             for index, link in enumerate(current_page_items, 1):
                 print(f"\n  -- عنصر ({index}/{len(current_page_items)})")
-                if section_type == "series":
-                    process_series_item(page, link)
-                else:
-                    process_movie_item(page, link)
+                process_movie_item(page, link)
             
             page_number += 1
             
@@ -421,7 +309,7 @@ def scrape_section(page, base_category_url, section_type):
             continue
 
 def scrape_akwam_site():
-    print("🚀 بدء تشغيل السكربت الشامل...")
+    print("🚀 بدء تشغيل السكربت لسحب الأفلام...")
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         context = browser.new_context(
@@ -430,11 +318,11 @@ def scrape_akwam_site():
         context.route("**/*.{png,jpg,jpeg,gif,webp,svg,woff,woff2,css}", lambda route: route.abort())
         page = context.new_page()
         
-        scrape_section(page, "https://akwams.org/category/مسلسلات-اجنبي", "series")
-        scrape_section(page, "https://akwams.org/category/movies", "movies")
+        # سحب قسم الأفلام فقط
+        scrape_section(page, "https://akwams.org/category/movies")
 
         browser.close()
-        print("\n🎉 تم الانتهاء من سحب كافة الأقسام بنجاح!")
+        print("\n🎉 تم الانتهاء من سحب كافة الأفلام بنجاح!")
 
 if __name__ == "__main__":
     scrape_akwam_site()
