@@ -46,40 +46,12 @@ def shorten_link_via_shrinkme(original_url):
         pass
     return original_url
 
-def get_best_poster(page, title):
-    # 1. البحث الدقيق عن روابط البوسترات داخل الصفحة والـ Meta Tags
+def get_best_poster(title):
     try:
-        poster = page.evaluate("""() => {
-            let metaImg = document.querySelector('meta[property="og:image"]');
-            if (metaImg && metaImg.content) {
-                return metaImg.content;
-            }
-            
-            let posterEl = document.querySelector('.poster img, .movie-poster img, .entry-image img, div[class*="poster"] img, .card-img-top');
-            if (posterEl) {
-                let src = posterEl.src || posterEl.getAttribute('data-src') || posterEl.getAttribute('data-lazy-src') || posterEl.getAttribute('srcset');
-                if (src) return src.split(' ')[0];
-            }
-            
-            const imgs = Array.from(document.querySelectorAll('img'));
-            for (let img of imgs) {
-                let src = img.src || img.getAttribute('data-src') || img.getAttribute('data-lazy-src');
-                if (src && !src.includes('logo') && !src.includes('default') && !src.includes('icon') && (src.includes('uploads') || src.includes('poster') || src.includes('image'))) {
-                    return src;
-                }
-            }
-            return null;
-        }""")
-        
-        if poster and poster != "غير متوفر" and not poster.startswith("chrome-error"):
-            return poster
-    except Exception:
-        pass
-
-    # 2. إذا لم يتم العثور عليها، يتم استخدام TMDB كخطة بديلة
-    try:
-        clean_name = re.sub(r'[\d\-\_\:\,\.\(\)]', ' ', title)
+        clean_name = re.sub(r'20\d{2}|19\d{2}', '', title)
+        clean_name = re.sub(r'[\d\-\_\:\,\.\(\)]', ' ', clean_name)
         clean_name = clean_text(clean_name)
+        
         if clean_name and len(clean_name) >= 2:
             query = urllib.parse.quote(clean_name)
             url = f"https://api.themoviedb.org/3/search/multi?api_key=3f4534f3c7e1451f28b49231f47d3c3d&query={query}&language=ar"
@@ -92,8 +64,8 @@ def get_best_poster(page, title):
                     poster_path = res.get("poster_path")
                     if poster_path:
                         return f"https://image.tmdb.org/t/p/w500{poster_path}"
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"    ⚠️ خطأ أثناء جلب البوستر من TMDB: {e}")
         
     return "غير متوفر"
 
@@ -223,7 +195,7 @@ def process_movie_item(page, item_page_url, current_cat_url):
 
     print(f"    🎬 تم العثور على فيلم: {title}")
 
-    existing = supabase.table("movies_cima").select("id, direct_links, watch_url, poster_url").eq("title", title).execute()
+    existing = supabase.table("movies_cima").select("id, direct_links, watch_url").eq("title", title).execute()
 
     if existing.data:
         current_data = existing.data[0]
@@ -233,25 +205,16 @@ def process_movie_item(page, item_page_url, current_cat_url):
             
         existing_downloads = existing_direct_links.get("download_links", [])
         existing_streaming = existing_direct_links.get("streaming_links", [])
-        current_poster = current_data.get("poster_url", "غير متوفر")
 
         is_downloads_empty = not existing_downloads or len(existing_downloads) == 0
         is_streaming_empty = not existing_streaming or len(existing_streaming) <= 1
-        is_poster_missing = not current_poster or current_poster == "غير متوفر" or "akwams" in current_poster
 
-        if not is_downloads_empty and not is_streaming_empty and not is_poster_missing:
-            print(f"    ⏭️ الفيلم موجود ولديه روابط كاملة وبوستر صحيح. تم التخطّي.")
+        if not is_downloads_empty and not is_streaming_empty:
+            print(f"    ⏭️ الفيلم موجود ولديه روابط كاملة. تم التخطّي.")
             return
 
         updated_needed = False
         updates_payload = {}
-
-        if is_poster_missing:
-            print(f"    ⚠️ البوستر غير متوفر أو يحمل شعار الموقع، جاري تحديثه...")
-            new_poster = get_best_poster(page, title)
-            if new_poster and new_poster != "غير متوفر":
-                updates_payload["poster_url"] = new_poster
-                updated_needed = True
 
         if is_downloads_empty:
             print(f"    ⚠️ روابط التحميل فارغة. جاري سحبها...")
@@ -273,11 +236,11 @@ def process_movie_item(page, item_page_url, current_cat_url):
                 updates_payload["direct_links"] = existing_direct_links
             try:
                 supabase.table("movies_cima").update(updates_payload).eq("title", title).execute()
-                print(f"    🔄 [تم تحديث وإثراء بيانات الفيلم بنجاح]: {title}")
+                print(f"    🔄 [تم تحديث روابط الفيلم بنجاح]: {title}")
             except Exception as e:
-                print(f"    ❌ خطأ أثناء تحديث بيانات لـ ({title}): {e}")
+                print(f"    ❌ خطأ أثناء تحديث روابط لـ ({title}): {e}")
         else:
-            print(f"    ℹ️ لم يتم العثور على بيانات جديدة إضافية لهذا الفيلم.")
+            print(f"    ℹ️ لم يتم العثور على روابط جديدة إضافية لهذا الفيلم.")
             
     else:
         print(f"    🆕 الفيلم غير موجود. جاري سحب البيانات وحفظه...")
@@ -300,7 +263,7 @@ def process_movie_item(page, item_page_url, current_cat_url):
             except Exception:
                 pass
 
-        poster = get_best_poster(page, title)
+        poster = get_best_poster(title)
 
         description = "غير متوفر"
         try:
@@ -359,7 +322,6 @@ def scrape_akwam_site():
         context = browser.new_context(
             user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
         )
-        # تم استبعاد الصور من الحظر لضمان قدرة الصفحة على جلب الروابط بشكل سليم
         context.route("**/*.{woff,woff2,css}", lambda route: route.abort())
         page = context.new_page()
         
@@ -415,4 +377,4 @@ def scrape_akwam_site():
         print("\n🎉 تم الانتهاء من كافة المهام بنجاح تام!")
 
 if __name__ == "__main__":
-    scrape_akwam_site()
+    scrape_akwam_state = scrape_akwam_site()
