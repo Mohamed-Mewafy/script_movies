@@ -46,9 +46,29 @@ def shorten_link_via_shrinkme(original_url):
         pass
     return original_url
 
-def get_tmdb_poster(title):
+def get_poster_from_akwam_or_tmdb(page, title):
+    # 1. محاولة استخراج بوستر الفيلم من موقع أكوام نفسه أولاً
     try:
-        # تنظيف العنوان تماماً من أي رموز أو كلمات زائدة للبحث بدقة
+        poster = page.evaluate("""() => {
+            let metaImg = document.querySelector('meta[property="og:image"]');
+            if (metaImg && metaImg.content && !metaImg.content.includes('default')) return metaImg.content;
+            
+            // البحث عن صور الغلاف الشائعة في أكوام
+            const el = document.querySelector('.entry-image img, .poster img, .movie-poster img, .media-image img, .box img, img[class*="poster"], img[class*="image"]');
+            if (el) {
+                let src = el.src || el.getAttribute('data-src') || el.getAttribute('data-lazy-src');
+                if (src && !src.includes('default')) return src;
+            }
+            return null;
+        }""")
+        
+        if poster and poster != "غير متوفر" and poster.startswith("http"):
+            return poster
+    except Exception:
+        pass
+
+    # 2. إذا لم يجد السكربت البوستر في أكوام، يبحث عنه عبر TMDB كبديل
+    try:
         clean_name = re.sub(r'[\d\-\_\:\,\.\(\)]', ' ', title)
         clean_name = clean_text(clean_name)
         if not clean_name or len(clean_name) < 2:
@@ -67,6 +87,7 @@ def get_tmdb_poster(title):
                     return f"https://image.tmdb.org/t/p/w500{poster_path}"
     except Exception:
         pass
+        
     return "غير متوفر"
 
 def extract_category_from_url_or_page(cat_url, page_genres, title):
@@ -140,8 +161,6 @@ def fetch_streaming_links_with_clicking(page, item_page_url):
         if not server_buttons:
             server_buttons = page.locator('button').all()
 
-        print(f"    🔍 تم العثور على {len(server_buttons)} زر سيرفر للضغط عليها...")
-
         for btn in server_buttons:
             try:
                 if btn.is_visible():
@@ -172,7 +191,7 @@ def fetch_streaming_links_with_clicking(page, item_page_url):
                         extracted_streaming_links.append(f_url)
                         
     except Exception as e:
-        print(f"    ⚠️ خطأ أثناء سحب روابط المشاهدة بالتفليش: {e}")
+        print(f"    ⚠️ خطأ أثناء سحب روابط المشاهدة: {e}")
         
     return list(set(extracted_streaming_links))
 
@@ -197,7 +216,7 @@ def process_movie_item(page, item_page_url, current_cat_url):
 
     print(f"    🎬 تم العثور على فيلم: {title}")
 
-    existing = supabase.table("movies_cima").select("id, direct_links, watch_url").eq("title", title).execute()
+    existing = supabase.table("movies_cima").select("id, direct_links, watch_url, poster_url").eq("title", title).execute()
 
     if existing.data:
         current_data = existing.data[0]
@@ -207,16 +226,25 @@ def process_movie_item(page, item_page_url, current_cat_url):
             
         existing_downloads = existing_direct_links.get("download_links", [])
         existing_streaming = existing_direct_links.get("streaming_links", [])
+        current_poster = current_data.get("poster_url", "غير متوفر")
 
         is_downloads_empty = not existing_downloads or len(existing_downloads) == 0
         is_streaming_empty = not existing_streaming or len(existing_streaming) <= 1
+        is_poster_missing = not current_poster or current_poster == "غير متوفر"
 
-        if not is_downloads_empty and not is_streaming_empty:
-            print(f"    ⏭️ الفيلم موجود ولديه روابط كاملة (مشاهدة متعددة وتحميل). تم التخطّي.")
+        if not is_downloads_empty and not is_streaming_empty and not is_poster_missing:
+            print(f"    ⏭️ الفيلم موجود ولديه روابط كاملة وبوستر صحيح. تم التخطّي.")
             return
 
         updated_needed = False
         updates_payload = {}
+
+        if is_poster_missing:
+            print(f"    ⚠️ البوستر غير متوفر، جاري إعادة جلبه...")
+            new_poster = get_poster_from_akwam_or_tmdb(page, title)
+            if new_poster and new_poster != "غير متوفر":
+                updates_payload["poster_url"] = new_poster
+                updated_needed = True
 
         if is_downloads_empty:
             print(f"    ⚠️ روابط التحميل فارغة. جاري سحبها...")
@@ -226,7 +254,7 @@ def process_movie_item(page, item_page_url, current_cat_url):
                 updated_needed = True
 
         if is_streaming_empty:
-            print(f"    ⚠️ روابط المشاهدة ناقصة أو تحتوي على رابط واحد. جاري إعادة فحص وسحب السيرفرات...")
+            print(f"    ⚠️ روابط المشاهدة ناقصة. جاري إعادة فحص وسحب السيرفرات...")
             extracted_streaming_links = fetch_streaming_links_with_clicking(page, item_page_url)
             if extracted_streaming_links and len(extracted_streaming_links) > len(existing_streaming):
                 existing_direct_links["streaming_links"] = extracted_streaming_links
@@ -234,17 +262,18 @@ def process_movie_item(page, item_page_url, current_cat_url):
                 updated_needed = True
 
         if updated_needed:
-            updates_payload["direct_links"] = existing_direct_links
+            if existing_direct_links:
+                updates_payload["direct_links"] = existing_direct_links
             try:
                 supabase.table("movies_cima").update(updates_payload).eq("title", title).execute()
-                print(f"    🔄 [تم تحديث وإثراء الروابط بنجاح للفيلم]: {title}")
+                print(f"    🔄 [تم تحديث وإثراء بيانات الفيلم بنجاح]: {title}")
             except Exception as e:
-                print(f"    ❌ خطأ أثناء تحديث الروابط لـ ({title}): {e}")
+                print(f"    ❌ خطأ أثناء تحديث بيانات لـ ({title}): {e}")
         else:
-            print(f"    ℹ️ لم يتم العثور على روابط جديدة إضافية لهذا الفيلم.")
+            print(f"    ℹ️ لم يتم العثور على بيانات جديدة إضافية لهذا الفيلم.")
             
     else:
-        print(f"    🆕 الفيلم غير موجود. جاري سحب روابط المشاهدة والتحميل وحفظه...")
+        print(f"    🆕 الفيلم غير موجود. جاري سحب البيانات وحفظه...")
         
         extracted_streaming_links = fetch_streaming_links_with_clicking(page, item_page_url)
         final_watch_url = extracted_streaming_links[0] if extracted_streaming_links else None
@@ -264,16 +293,7 @@ def process_movie_item(page, item_page_url, current_cat_url):
             except Exception:
                 pass
 
-        poster = "غير متوفر"
-        try:
-            poster = page.evaluate("""() => {
-                let metaImg = document.querySelector('meta[property="og:image"]');
-                if (metaImg && metaImg.content) return metaImg.content;
-                const el = document.querySelector('.entry-image img, .poster img, img');
-                return el ? (el.src || el.getAttribute('data-src')) : "غير متوفر";
-            }""")
-        except Exception:
-            pass
+        poster = get_poster_from_akwam_or_tmdb(page, title)
 
         description = "غير متوفر"
         try:
@@ -306,8 +326,6 @@ def process_movie_item(page, item_page_url, current_cat_url):
             pass
 
         clean_category = extract_category_from_url_or_page(current_cat_url, genres, title)
-        if poster == "غير متوفر" or not poster.startswith("http"):
-            poster = get_tmdb_poster(title)
 
         formatted_movie = {
             "title": title,
@@ -323,12 +341,12 @@ def process_movie_item(page, item_page_url, current_cat_url):
 
         try:
             supabase.table("movies_cima").upsert(formatted_movie, on_conflict="title").execute()
-            print(f"    ✅ [تم حفظ أو تحديث الفيلم بكامل روابطه بنجاح]: {title}")
+            print(f"    ✅ [تم حفظ الفيلم بكامل بياناته بنجاح]: {title}")
         except Exception as e:
             print(f"    ❌ خطأ أثناء حفظ الفيلم الجديد ({title}): {e}")
 
 def scrape_akwam_site():
-    print("🚀 بدء السكربت لتفليش وسحب السيرفرات والتحميل لكل الأفلام...")
+    print("🚀 بدء السكربت لتفليش وسحب السيرفرات والبوسترات والتحميل لكل الأفلام...")
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         context = browser.new_context(
