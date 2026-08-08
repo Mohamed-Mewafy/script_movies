@@ -160,9 +160,9 @@ def fetch_download_links_only(page, item_page_url, max_retries=2):
 
     for attempt in range(max_retries):
         try:
-            page.goto(download_page_url, wait_until="domcontentloaded", timeout=20000)
+            page.goto(download_page_url, wait_until="domcontentloaded", timeout=15000)
             try:
-                page.wait_for_selector('a[href*="download"], a[href*="/link/"], .btn-download, a.download-link', timeout=5000)
+                page.wait_for_selector('a[href*="download"], a[href*="/link/"], .btn-download, a.download-link', timeout=4000)
             except Exception:
                 pass
 
@@ -197,7 +197,7 @@ def fetch_download_links_only(page, item_page_url, max_retries=2):
                 break
         except Exception as e:
             if attempt == max_retries - 1:
-                print(f"تعذر زيارة صفحة التحميل ({download_page_url}): {e}")
+                print(f"   ⚠️ تعذر زيارة صفحة التحميل ({download_page_url}): {e}", flush=True)
             time.sleep(1)
 
     shortened_download_links = []
@@ -210,7 +210,8 @@ def fetch_download_links_only(page, item_page_url, max_retries=2):
 def scrape_akwam_item_details(page, item_page_url):
     try:
         page.goto(item_page_url, wait_until="domcontentloaded", timeout=15000)
-    except Exception:
+    except Exception as e:
+        print(f"   ❌ فشل فتح الرابط {item_page_url}: {e}", flush=True)
         return None
 
     title = ""
@@ -349,10 +350,11 @@ def save_or_update_download_links(page, item_data, category_type, current_cat_ur
             if isinstance(direct_links, dict):
                 download_links = direct_links.get("download_links", [])
                 if not download_links:
-                    new_download_links = fetch_download_links_only(page, item_page_url)
+                    new_download_links = item_data.get("direct_links", {}).get("download_links", [])
                     if new_download_links:
                         direct_links["download_links"] = list(set(new_download_links))
                         supabase.table("movies_cima").update({"direct_links": direct_links}).eq("id", movie_id).execute()
+                        print(f"   🔄 تم تحديث روابط التحميل لـ: {title}", flush=True)
             return
 
         raw_genres = item_data.get("genres", [])
@@ -374,6 +376,7 @@ def save_or_update_download_links(page, item_data, category_type, current_cat_ur
             "direct_links": item_data.get("direct_links", {"streaming_links": [], "download_links": []})
         }
         supabase.table("movies_cima").upsert(formatted_movie, on_conflict="title").execute()
+        print(f"   ✅ تم حفظ الفيلم: {title}", flush=True)
     else:
         series_title, season_num, episode_num = extract_series_and_episode_info(title)
         raw_genres = item_data.get("genres", [])
@@ -409,10 +412,11 @@ def save_or_update_download_links(page, item_data, category_type, current_cat_ur
             if isinstance(direct_links, dict):
                 download_links = direct_links.get("download_links", [])
                 if not download_links:
-                    new_download_links = fetch_download_links_only(page, item_page_url)
+                    new_download_links = item_data.get("direct_links", {}).get("download_links", [])
                     if new_download_links:
                         direct_links["download_links"] = list(set(new_download_links))
                         supabase.table("episodes_cima").update({"direct_links": direct_links}).eq("id", ep_id).execute()
+                        print(f"   🔄 تم تحديث الحلقة {episode_num} لـ: {series_title}", flush=True)
             return
 
         formatted_episode = {
@@ -424,8 +428,10 @@ def save_or_update_download_links(page, item_data, category_type, current_cat_ur
             "direct_links": item_data.get("direct_links", {"streaming_links": [], "download_links": []})
         }
         supabase.table("episodes_cima").insert(formatted_episode).execute()
+        print(f"   ✅ تم حفظ الحلقة {episode_num} لـ: {series_title}", flush=True)
 
 def scrape_akwam_site():
+    print("🚀 بدء تشغيل متصفح Playwright...", flush=True)
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         context = browser.new_context(
@@ -448,12 +454,14 @@ def scrape_akwam_site():
         ]
 
         for cat_url in target_categories:
+            print(f"\n📂 جاري معالجة التصنيف: {cat_url}", flush=True)
             current_page_url = cat_url
             match_page = re.search(r'/page/(\d+)', cat_url)
             page_number = int(match_page.group(1)) if match_page else 1
             max_pages = 9999
             
             while current_page_url and page_number <= max_pages:
+                print(f"📄 جاري فحص الصفحة [{page_number}]: {current_page_url}", flush=True)
                 try:
                     page.goto(current_page_url, wait_until="domcontentloaded", timeout=20000)
                     if page_number == 1 or "/page/" not in cat_url:
@@ -473,9 +481,12 @@ def scrape_akwam_site():
                     }""")
                     
                     item_links = list(set(item_cards))
+                    print(f"   🔍 تم العثور على {len(item_links)} عنصر في هذه الصفحة", flush=True)
+                    
                     for index, link in enumerate(item_links, 1):
                         if not is_valid_link(link):
                             continue
+                        print(f"   [{index}/{len(item_links)}] جاري كشط: {link}", flush=True)
                         result = scrape_akwam_item_details(page, link)
                         if result:
                             item_data, cat_type = result
@@ -491,10 +502,12 @@ def scrape_akwam_site():
                     else:
                         base = current_page_url.rstrip('/')
                         current_page_url = f"{base}/page/{page_number}"
-                except Exception:
+                except Exception as e:
+                    print(f"❌ خطأ أثناء معالجة الصفحة {current_page_url}: {e}", flush=True)
                     break
 
         browser.close()
+        print("\n✨ تم الانتهاء من عملية الكشط بنجاح!", flush=True)
 
 if __name__ == "__main__":
     scrape_akwam_site()
