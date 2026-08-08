@@ -24,16 +24,15 @@ def clean_text(text):
     return " ".join(text.split()).strip()
 
 def normalize_movie_title(raw_title):
-    # إزالة الكلمات الزائدة من أي مكان في العنوان لتوحيد الاسم تماماً
     name = re.sub(r'\b(مشاهدة|تحميل|فيلم|اونلاين|مدبلج|مترجم|برابط|مباشر|بجودة|HD|FHD|4K|720p|1080p)\b', '', raw_title, flags=re.IGNORECASE)
-    # إزالة السنوات (مثلاً 2026) والرموز الزائدة
     name = re.sub(r'\b(19|20)\d{2}\b', '', name)
     clean_name = re.sub(r'(-|\||–|_|\(|\))', ' ', name)
     clean_name = clean_text(clean_name)
     
-    invalid_names = ["جديد", "حصريا", "فيلم"]
-    if not clean_name or clean_name in invalid_names or len(clean_name) < 2:
+    blocked_keywords = ["اكوام", "akwam", "جديد", "حصريا", "الرئيسية", "قسم", "تحميل", "مشاهدة", "مسلسلات", "برامج"]
+    if not clean_name or len(clean_name) < 2 or any(word in clean_name.lower() for word in blocked_keywords):
         return None
+        
     return clean_name
 
 def shorten_link_via_shrinkme(original_url):
@@ -159,7 +158,7 @@ def process_movie_item(page, item_page_url, cat_type):
 
     movie_title = normalize_movie_title(title)
     if not movie_title:
-        return
+        return  # سيتم تخطي أي شيء ليس فيلماً حقيقياً فوراً
 
     # التحقق مسبقاً من قاعدة البيانات لتفادي تكرار الفيلم
     try:
