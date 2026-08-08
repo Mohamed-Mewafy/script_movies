@@ -47,6 +47,7 @@ def shorten_link_via_shrinkme(original_url):
     return original_url
 
 def get_best_poster(page, title):
+    # 1. البحث مباشرة عن صور الرفع الخاصة بأكوام داخل الصفحة (wp-content/uploads)
     try:
         poster = page.evaluate("""() => {
             let metaImg = document.querySelector('meta[property="og:image"]');
@@ -69,6 +70,7 @@ def get_best_poster(page, title):
     except Exception:
         pass
 
+    # 2. إذا لم يتم العثور عليها في أكوام، يتم استخدام TMDB كخطة بديلة
     try:
         clean_name = re.sub(r'[\d\-\_\:\,\.\(\)]', ' ', title)
         clean_name = clean_text(clean_name)
@@ -88,6 +90,24 @@ def get_best_poster(page, title):
         pass
         
     return "غير متوفر"
+
+def extract_category_from_url_or_page(cat_url, page_genres, title):
+    url_lower = cat_url.lower()
+    if "عربي" in url_lower:
+        return "افلام عربي"
+    elif "اجنبي" in url_lower:
+        return "افلام اجنبي"
+    elif "هندية" in url_lower:
+        return "افلام هندية"
+    elif "اسيوية" in url_lower:
+        return "افلام اسيوية"
+    elif "انمي" in url_lower:
+        return "افلام انمي"
+    for g in page_genres:
+        clean_g = clean_text(g)
+        if "افلام" in clean_g or "مسلسلات" in clean_g:
+            return clean_g
+    return "افلام عامة"
 
 def fetch_download_links_only(page, item_page_url):
     raw_download_links = []
@@ -176,7 +196,7 @@ def fetch_streaming_links_with_clicking(page, item_page_url):
         
     return list(set(extracted_streaming_links))
 
-def process_movie_item(page, item_page_url):
+def process_movie_item(page, item_page_url, current_cat_url):
     try:
         page.goto(item_page_url, wait_until="domcontentloaded", timeout=15000)
     except Exception as e:
@@ -195,7 +215,7 @@ def process_movie_item(page, item_page_url):
         print(f"    ⚠️ صفحة غير صالحة أو صفحة رئيسية/تسجيل دخول، تم التخطّي.")
         return
 
-    print(f"    🎬 تم العثور على فيلم أجنبي: {title}")
+    print(f"    🎬 تم العثور على فيلم: {title}")
 
     existing = supabase.table("movies_cima").select("id, direct_links, watch_url, poster_url").eq("title", title).execute()
 
@@ -306,9 +326,11 @@ def process_movie_item(page, item_page_url):
         except Exception:
             pass
 
+        clean_category = extract_category_from_url_or_page(current_cat_url, genres, title)
+
         formatted_movie = {
             "title": title,
-            "category_type": "افلام اجنبي",
+            "category_type": clean_category,
             "year": year,
             "poster_url": poster,
             "description": description,
@@ -320,12 +342,12 @@ def process_movie_item(page, item_page_url):
 
         try:
             supabase.table("movies_cima").upsert(formatted_movie, on_conflict="title").execute()
-            print(f"    ✅ [تم حفظ الفيلم الأجنبي بكامل بياناته بنجاح]: {title}")
+            print(f"    ✅ [تم حفظ الفيلم بكامل بياناته بنجاح]: {title}")
         except Exception as e:
             print(f"    ❌ خطأ أثناء حفظ الفيلم الجديد ({title}): {e}")
 
 def scrape_akwam_site():
-    print("🚀 بدء السكربت المخصص لـ [الأفلام الأجنبية فقط]...")
+    print("🚀 بدء السكربت لتفليش وسحب السيرفرات والبوسترات والتحميل لكل الأفلام...")
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         context = browser.new_context(
@@ -334,71 +356,56 @@ def scrape_akwam_site():
         context.route("**/*.{png,jpg,jpeg,gif,webp,svg,woff,woff2,css}", lambda route: route.abort())
         page = context.new_page()
         
-        # روابط قسم الأفلام الأجنبية الأساسية في أكوام
-        categories = [
-            "https://akwams.org/movies/english",
-            "https://akwams.org/category/movies/english",
-            "https://akwams.org/category/movies/foreign"
-        ]
+        base_category_url = "https://akwams.org/category/movies"
+        page_number = 1
         
-        for base_category_url in categories:
-            print(f"\n🔄 محاولة Fحص القسم الأجنبي: {base_category_url}")
-            page_number = 1
-            has_items = False
-            
-            while True:
-                if page_number == 1:
-                    current_page_url = f"{base_category_url}/" if not base_category_url.endswith("/") else base_category_url
-                else:
-                    clean_base = base_category_url.rstrip('/')
-                    current_page_url = f"{clean_base}/page/{page_number}/"
-                    
-                print(f"\n📂 جاري فحص الصفحة رقم [{page_number}] | الرابط: {current_page_url}")
+        while True:
+            if page_number == 1:
+                current_page_url = f"{base_category_url}/"
+            else:
+                current_page_url = f"{base_category_url}/page/{page_number}/"
                 
-                try:
-                    response = page.goto(current_page_url, wait_until="domcontentloaded", timeout=30000)
-                    
-                    if response and response.status == 404:
-                        print(f"🏁 انتهى هذا القسم الأجنبي (خطأ 404).")
-                        break
-
-                    time.sleep(2)
-                    
-                    item_links = page.evaluate("""() => {
-                        const anchors = Array.from(document.querySelectorAll('a'));
-                        const links = anchors.map(a => a.href).filter(h => {
-                            if (!h || !h.includes('akwams.org')) return false;
-                            if (h.includes('/category/') || h.includes('/page/') || h.includes('/tag/') || h.includes('/search/') || h.includes('/login') || h.includes('/recent')) return false;
-                            if (h === 'https://akwams.org/' || h === 'https://akwams.org') return false;
-                            const parts = h.split('/').filter(Boolean);
-                            return parts.length >= 3 && parts[parts.length - 1].length > 5;
-                        });
-                        return [...new Set(links)];
-                    }""")
-                    
-                    if not item_links:
-                        print(f"🏁 لا توجد روابط أخرى في الصفحة [{page_number}].")
-                        break
-                    
-                    has_items = True
-                    print(f"🔗 عُثر على {len(item_links)} رابط فيلم أجنبي في هذه الصفحة...")
-                    
-                    for index, link in enumerate(item_links, 1):
-                        print(f"\n  -- فيلم أجنبي ({index}/{len(item_links)})")
-                        process_movie_item(page, link)
-                    
-                    page_number += 1
-                    
-                except Exception as e:
-                    print(f"⚠️ حدث خطأ عند الصفحة [{page_number}]: {e}")
-                    break
+            print(f"\n📂 جاري فحص الصفحة رقم [{page_number}] | الرابط: {current_page_url}")
             
-            if has_items:
-                print(f"✅ تم الانتهاء من فحص هذا القسم الأجنبي بنجاح.")
-                break # إذا نجح وجلب أفلام من أحد الروابط المتاحة، يمكننا الاكتفاء به أو إكمال البقية
+            try:
+                response = page.goto(current_page_url, wait_until="domcontentloaded", timeout=30000)
+                
+                if response and response.status == 404:
+                    print(f"🏁 وصلنا إلى نهاية الصفحات (خطأ 404). تم الانتهاء تماماً!")
+                    break
+
+                time.sleep(2)
+                
+                item_links = page.evaluate("""() => {
+                    const anchors = Array.from(document.querySelectorAll('a'));
+                    const links = anchors.map(a => a.href).filter(h => {
+                        if (!h || !h.includes('akwams.org')) return false;
+                        if (h.includes('/category/') || h.includes('/page/') || h.includes('/tag/') || h.includes('/search/') || h.includes('/login') || h.includes('/recent')) return false;
+                        if (h === 'https://akwams.org/' || h === 'https://akwams.org') return false;
+                        const parts = h.split('/').filter(Boolean);
+                        return parts.length >= 3 && parts[parts.length - 1].length > 5;
+                    });
+                    return [...new Set(links)];
+                }""")
+                
+                if not item_links:
+                    print(f"🏁 لا توجد روابط أخرى في الصفحة [{page_number}]. تم الانتهاء!")
+                    break
+                
+                print(f"🔗 عُثر على {len(item_links)} رابط فيلم في هذه الصفحة...")
+                
+                for index, link in enumerate(item_links, 1):
+                    print(f"\n  -- فيلم ({index}/{len(item_links)})")
+                    process_movie_item(page, link, current_page_url)
+                
+                page_number += 1
+                
+            except Exception as e:
+                print(f"⚠️ حدث خطأ عند الصفحة [{page_number}]: {e}")
+                break
 
         browser.close()
-        print("\n🎉 تم الانتهاء من كافة المهام للأفلام الأجنبية بنجاح تام!")
+        print("\n🎉 تم الانتهاء من كافة المهام بنجاح تام!")
 
 if __name__ == "__main__":
     scrape_akwam_site()
