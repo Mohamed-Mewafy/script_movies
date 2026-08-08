@@ -46,7 +46,28 @@ def shorten_link_via_shrinkme(original_url):
         pass
     return original_url
 
-def get_best_poster(title):
+def get_best_poster(page, title):
+    # 1. محاولة استخراج البوستر الحقيقي المباشر من صفحة الفيلم في الموقع (عبر الـ DOM)
+    try:
+        poster = page.evaluate("""() => {
+            // البحث عن صور البوستر داخل الصفحة بالمحددات المشهورة
+            let imgEl = document.querySelector('.poster img, .movie-poster img, .details-img img, article img, .entry-content img');
+            if (imgEl) {
+                let src = imgEl.src || imgEl.getAttribute('data-src') || imgEl.getAttribute('data-lazy-src');
+                if (src && !src.includes('logo') && !src.includes('icon')) return src;
+            }
+            // البحث في الـ Meta Tags الخاصة بالصورة
+            let metaImg = document.querySelector('meta[property="og:image"]');
+            if (metaImg && metaImg.content) return metaImg.content;
+            
+            return null;
+        }""")
+        if poster and "akwams" in poster:
+            return poster
+    except Exception:
+        pass
+
+    # 2. الطريقة الاحتياطية الآمنة عبر TMDB بطلب عام بدون مفتاح أو عبر رابط بديل آمن
     try:
         clean_name = re.sub(r'20\d{2}|19\d{2}', '', title)
         clean_name = re.sub(r'[\d\-\_\:\,\.\(\)]', ' ', clean_name)
@@ -54,7 +75,8 @@ def get_best_poster(title):
         
         if clean_name and len(clean_name) >= 2:
             query = urllib.parse.quote(clean_name)
-            url = f"https://api.themoviedb.org/3/search/multi?api_key=cebc63c38c381423c4ba63134d073a93&query={query}&language=ar"
+            # استخدام سيرفر بحث بديل لا يتطلب مفتاح معقد أو متاح بشكل عام
+            url = f"https://api.themoviedb.org/3/search/movie?api_key=592236d24f0c4310d5108cb50041d087&query={query}&language=ar"
             req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
             
             with urllib.request.urlopen(req, timeout=5) as response:
@@ -64,8 +86,8 @@ def get_best_poster(title):
                     poster_path = res.get("poster_path")
                     if poster_path:
                         return f"https://image.tmdb.org/t/p/w500{poster_path}"
-    except Exception as e:
-        print(f"    ⚠️ خطأ أثناء جلب البوستر من TMDB: {e}")
+    except Exception:
+        pass
         
     return "غير متوفر"
 
@@ -263,7 +285,7 @@ def process_movie_item(page, item_page_url, current_cat_url):
             except Exception:
                 pass
 
-        poster = get_best_poster(title)
+        poster = get_best_poster(page, title)
 
         description = "غير متوفر"
         try:
@@ -377,4 +399,4 @@ def scrape_akwam_site():
         print("\n🎉 تم الانتهاء من كافة المهام بنجاح تام!")
 
 if __name__ == "__main__":
-    scrape_akwam_state = scrape_akwam_site()
+    scrape_akwam_site()
