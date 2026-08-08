@@ -8,40 +8,29 @@ import requests
 from playwright.sync_api import sync_playwright
 from supabase import create_client, Client
 
-# ==========================================
-# الإعدادات ومفاتيح البيئة
-# ==========================================
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
 SHRINKME_API_TOKEN = os.environ.get("SHRINKME_API_TOKEN")
-TMDB_API_KEY = os.environ.get("TMDB_API_KEY", "3f4534f3c7e1451f28b49231f47d3c3d")
 
 if not SUPABASE_URL or not SUPABASE_KEY:
-    raise ValueError("⚠️ يرجى التأكد من ضبط متغيرات البيئة SUPABASE_URL و SUPABASE_KEY.")
+    raise ValueError("⚠️ تنبيه: يرجى التأكد من ضبط متغيرات البيئة SUPABASE_URL و SUPABASE_KEY بشكل صحيح.")
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-# ==========================================
-# الدوال المساعدة
-# ==========================================
 def clean_text(text):
     if not text:
         return ""
     text = re.sub(r'[\"\'\[\]\{\}]', '', text)
     return " ".join(text.split()).strip()
 
-def normalize_movie_title(raw_title):
-    name = re.sub(r'^(مشاهدة|تحميل|فيلم)?\s*', '', raw_title).strip()
-    clean_name = re.sub(r'\s*(-|\||مترجم|مدبلج|اكوام|Akwam|اونلاين|بجودة|HD|4K|1080p|720p).*', '', name, flags=re.IGNORECASE).strip()
-    clean_name = clean_text(clean_name)
-    
-    invalid_names = ["جديد", "حصريا", "فيلم"]
-    if not clean_name or clean_name in invalid_names or len(clean_name) < 2:
-        return None
-    return clean_name
+def clean_title(raw_title):
+    title = raw_title.replace("مشاهدة", "").replace("فيلم", "").replace("مسلسل", "")
+    title = title.replace("مترجم", "").replace("مدبلج", "").replace("اكوام", "").replace("Akwam", "")
+    title = title.split("|")[0].split("-")[0]
+    return clean_text(title)
 
 def shorten_link_via_shrinkme(original_url):
-    if not original_url or not SHRINKME_API_TOKEN:
+    if not original_url:
         return original_url
     if "shrinkme.io" in original_url or "shrinkme.click" in original_url:
         return original_url
@@ -53,8 +42,8 @@ def shorten_link_via_shrinkme(original_url):
             data = response.json()
             if data.get("status") == "success" and data.get("shortenedUrl"):
                 return data.get("shortenedUrl")
-    except Exception as e:
-        print(f"    ⚠️ خطأ في اختصار الرابط: {e}")
+    except Exception:
+        pass
     return original_url
 
 def get_tmdb_poster(title):
@@ -64,7 +53,7 @@ def get_tmdb_poster(title):
         if not clean_name or len(clean_name) < 2:
             return "غير متوفر"
         query = urllib.parse.quote(clean_name)
-        url = f"https://api.themoviedb.org/3/search/movie?api_key={TMDB_API_KEY}&query={query}&language=ar"
+        url = f"https://api.themoviedb.org/3/search/multi?api_key=3f4534f3c7e1451f28b49231f47d3c3d&query={query}&language=ar"
         req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
         with urllib.request.urlopen(req, timeout=5) as response:
             data = json.loads(response.read().decode())
@@ -77,75 +66,139 @@ def get_tmdb_poster(title):
         pass
     return "غير متوفر"
 
-def extract_media_links(page):
-    download_links = []
-    streaming_links = []
-    
-    # 1. استخراج روابط التحميل
+def fetch_download_links_only(page, item_page_url):
+    raw_download_links = []
+    clean_base_url = item_page_url.rstrip('/')
+    download_page_url = f"{clean_base_url}/download"
+
     try:
-        raw_links = page.evaluate("""() => {
+        page.goto(download_page_url, wait_until="domcontentloaded", timeout=15000)
+        time.sleep(2)
+        
+        links = page.evaluate("""() => {
             const anchors = Array.from(document.querySelectorAll('a[href]'));
             return anchors.map(a => a.href).filter(h => {
                 if (!h) return false;
-                return h.includes('download') || h.includes('link') || h.includes('file') || h.includes('niramirus') || h.includes('direct');
+                if (h === window.location.href || h.endsWith('/download') || h.endsWith('/download/')) return false;
+                return h.includes('download') || 
+                       h.includes('link') || 
+                       h.includes('file') || 
+                       h.includes('niramirus') || 
+                       h.includes('server') ||
+                       h.includes('direct') ||
+                       h.includes('get') ||
+                       !h.includes('akwams.org');
             });
         }""")
-        for link in raw_links:
-            if link and link not in download_links and not link.startswith("chrome-error://"):
-                download_links.append(link)
+        
+        for link in links:
+            if link and link not in raw_download_links and not link.startswith("chrome-error://"):
+                raw_download_links.append(link)
+                
     except Exception as e:
-        print(f"    ⚠️ خطأ أثناء قراءة روابط التحميل: {e}")
+        print(f"    ⚠️ خطأ أثناء سحب روابط التحميل: {e}")
 
-    # 2. استخراج سيرفرات المشاهدة
+    shortened_download_links = []
+    for raw_link in raw_download_links:
+        short_link = shorten_link_via_shrinkme(raw_link)
+        if short_link:
+            shortened_download_links.append(short_link)
+            
+    return list(set(shortened_download_links))
+
+def fetch_streaming_links_with_clicking(page, item_page_url):
+    watch_page_url = f"{item_page_url.rstrip('/')}/watch/"
+    extracted_streaming_links = []
+    
     try:
-        server_buttons = page.locator('button:has-text("سيرفر"), a:has-text("سيرفر"), .servers-list button, div[class*="server"] button').all()
-        for btn in server_buttons[:5]:
+        page.goto(watch_page_url, wait_until="domcontentloaded", timeout=15000)
+        time.sleep(3)
+        
+        server_buttons = page.locator('button:has-text("سيرفر"), a:has-text("سيرفر"), .servers-list button, .servers-list li, div[class*="server"] button').all()
+        
+        if not server_buttons:
+            server_buttons = page.locator('button').all()
+
+        print(f"    🔍 تم العثور على {len(server_buttons)} زر سيرفر للضغط عليها...")
+
+        for btn in server_buttons:
             try:
                 if btn.is_visible():
                     btn.click(timeout=2000)
-                    time.sleep(1)
-                    frame_url = page.evaluate("() => document.querySelector('iframe')?.src")
-                    if frame_url and frame_url not in streaming_links and "akwams" not in frame_url and "about:blank" not in frame_url:
-                        streaming_links.append(frame_url)
+                    time.sleep(1.5)
+                    
+                    frame_url = page.evaluate("""() => {
+                        const iframe = document.querySelector('iframe');
+                        return iframe ? iframe.src : null;
+                    }""")
+                    
+                    if (frame_url and 
+                        frame_url not in extracted_streaming_links and 
+                        "akwams" not in frame_url and 
+                        "about:blank" not in frame_url and
+                        not frame_url.startswith("chrome-error://")):
+                        extracted_streaming_links.append(frame_url)
             except Exception:
                 pass
+            
+            for frame in page.frames:
+                f_url = frame.url
+                if (f_url and 
+                    "akwams.org" not in f_url and 
+                    "about:blank" not in f_url and 
+                    not f_url.startswith("chrome-error://")):
+                    if f_url not in extracted_streaming_links:
+                        extracted_streaming_links.append(f_url)
+                        
     except Exception as e:
-        print(f"    ⚠️ خطأ أثناء فحص سيرفرات المشاهدة: {e}")
+        print(f"    ⚠️ خطأ أثناء سحب روابط المشاهدة بالتفليش: {e}")
+        
+    return list(set(extracted_streaming_links))
 
-    shortened_downloads = [shorten_link_via_shrinkme(l) for l in download_links if l]
-    return list(set(streaming_links)), shortened_downloads
-
-# ==========================================
-# معالجة صفحة الفيلم
-# ==========================================
-def process_movie(page, movie_page_url, cat_type):
+def process_movie_item(page, item_page_url, current_cat_url):
     try:
-        res = page.goto(movie_page_url, wait_until="domcontentloaded", timeout=20000)
-        if res and res.status == 404:
-            return
+        page.goto(item_page_url, wait_until="domcontentloaded", timeout=15000)
     except Exception as e:
-        print(f"⚠️ تعذر فتح الرابط {movie_page_url}: {e}")
+        print(f"    ❌ فشل فتح صفحة الفيلم: {e}")
         return
 
     title = ""
     try:
         page_title = page.title()
         if page_title:
-            title = clean_text(page_title)
+            title = clean_title(page_title)
     except Exception:
         pass
 
-    invalid_keywords = ["page not found", "404", "تصنيف", "الصفحة الرئيسية", "تسجيل الدخول"]
-    if not title or any(kw in title.lower() for kw in invalid_keywords):
+    if not title or len(title) < 2 or "الصفحة الرئيسية" in title or "تسجيل الدخول" in title:
+        print(f"    ⚠️ صفحة غير صالحة، تم التخطّي.")
         return
 
-    movie_title = normalize_movie_title(title)
-    if not movie_title:
+    print(f"    🎬 تم العثور على فيلم: {title}")
+
+    existing = supabase.table("movies_cima").select("id, direct_links, watch_url").eq("title", title).execute()
+
+    if existing.data:
+        print(f"    ⏭️ الفيلم موجود مسبقاً. تم التخطّي.")
         return
 
-    print(f"\n🎬 جاري معالجة فيلم: {movie_title}")
+    extracted_streaming_links = fetch_streaming_links_with_clicking(page, item_page_url)
+    final_watch_url = extracted_streaming_links[0] if extracted_streaming_links else None
+    extracted_download_links = fetch_download_links_only(page, item_page_url)
 
-    # 1. البوستر
+    direct_links_json = {
+        "streaming_links": extracted_streaming_links,
+        "download_links": extracted_download_links
+    }
+
+    year = None
+    match = re.search(r'20\d{2}|19\d{2}', title)
+    if match:
+        try:
+            year = int(match.group(0))
+        except Exception:
+            pass
+
     poster = "غير متوفر"
     try:
         poster = page.evaluate("""() => {
@@ -157,121 +210,241 @@ def process_movie(page, movie_page_url, cat_type):
     except Exception:
         pass
 
-    if poster == "غير متوفر" or not str(poster).startswith("http"):
-        poster = get_tmdb_poster(movie_title)
-
-    # 2. الوصف
     description = "غير متوفر"
     try:
-        desc_text = page.evaluate("() => document.querySelector('.story, .text-white, article p')?.innerText.trim()")
+        desc_text = page.evaluate("""() => {
+            const el = document.querySelector('.story, .text-white, article p');
+            return el ? el.innerText.trim() : "غير متوفر";
+        }""")
         if desc_text and len(desc_text) > 5:
             description = desc_text
     except Exception:
         pass
 
-    # 3. التقييم
     rating = "غير متوفر"
     try:
-        rating_text = page.evaluate("() => document.querySelector('span.mx-2, .rating span')?.innerText.trim()")
+        rating_text = page.evaluate("""() => {
+            const el = document.querySelector('span.mx-2, .rating span');
+            return el ? el.innerText.trim() : "غير متوفر";
+        }""")
         if rating_text:
             rating = rating_text
     except Exception:
         pass
 
-    # 4. التصنيفات (Genres)
     genres = []
     try:
-        genres = page.evaluate("() => Array.from(document.querySelectorAll('.genres a, .cats a, a[href*=\"category\"]')).map(t => t.innerText.trim()).filter(Boolean)")
+        genres = page.evaluate("""() => {
+            return Array.from(document.querySelectorAll('.genres a, .cats a, a[href*="category"]')).map(t => t.innerText.trim()).filter(Boolean);
+        }""")
     except Exception:
         pass
 
-    # 5. جلب روابط المشاهدة والتحميل
-    extracted_streaming, extracted_download = extract_media_links(page)
+    if poster == "غير متوفر" or not poster.startswith("http"):
+        poster = get_tmdb_poster(title)
 
-    movie_data = {
-        "title": movie_title,
-        "category_type": cat_type,
+    formatted_movie = {
+        "title": title,
+        "category_type": "افلام اجنبي",
+        "year": year,
         "poster_url": poster,
         "description": description,
         "rating": rating,
         "genres": [clean_text(g) for g in genres if clean_text(g)],
-        "watch_url": extracted_streaming[0] if extracted_streaming else None,
-        "direct_links": {
-            "streaming_links": extracted_streaming,
-            "download_links": extracted_download
-        }
+        "watch_url": final_watch_url,
+        "direct_links": direct_links_json
     }
 
     try:
-        supabase.table("movies_cima").upsert(movie_data, on_conflict="title").execute()
-        print(f"  ✅ تم حفظ الفيلم بنجاح في Supabase!")
+        supabase.table("movies_cima").insert(formatted_movie).execute()
+        print(f"    ✅ [تم حفظ الفيلم بنجاح]: {title}")
     except Exception as e:
-        print(f"  ❌ خطأ في حفظ الفيلم: {e}")
+        print(f"    ❌ خطأ أثناء حفظ الفيلم ({title}): {e}")
 
-# ==========================================
-# السكربت الرئيسي
-# ==========================================
-def scrape_movies():
-    movie_categories = [
-        ("https://akwams.org/category/افلام-اجنبي", "افلام اجنبي"),
-        ("https://akwams.org/category/افلام-عربي", "افلام عربي"),
-        ("https://akwams.org/category/افلام-هندي", "افلام هندي"),
-        ("https://akwams.org/category/افلام-انمي", "افلام انمي")
-    ]
+def process_series_item(page, item_page_url):
+    try:
+        page.goto(item_page_url, wait_until="domcontentloaded", timeout=15000)
+    except Exception as e:
+        print(f"    ❌ فشل فتح صفحة الحلقة/المسلسل: {e}")
+        return
 
-    print("🚀 بدء تشغيل سكربت سحب الأفلام فقط...")
-    with sync_playwright() as p:
-        browser = p.chromium.launch(
-            headless=True,
-            args=['--disable-blink-features=AutomationControlled']
-        )
-        context = browser.new_context(
-            user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
-        )
-        
-        # حظر الصور والملفات الثقيلة للسرعة
-        context.route("**/*.{png,jpg,jpeg,gif,webp,svg,woff,woff2}", lambda route: route.abort())
-        page = context.new_page()
+    raw_page_title = ""
+    try:
+        raw_page_title = page.title()
+    except Exception:
+        pass
 
-        for base_url, cat_type in movie_categories:
-            print(f"\n==========================================")
-            print(f"📂 بدء سحب قسم: {cat_type}")
-            print(f"==========================================")
+    if not raw_page_title or "الصفحة الرئيسية" in raw_page_title or "تسجيل الدخول" in raw_page_title:
+        print(f"    ⚠️ صفحة غير صالحة، تم التخطّي.")
+        return
+
+    # استخراج رقم الحلقة الصحيح بدقة من عنوان الصفحة
+    episode_title = "الحلقة"
+    ep_match = re.search(r'(الحلقة\s+\d+|الموسم\s+\d+\s+الحلقة\s+\d+|حلقة\s+\d+)', raw_page_title)
+    if ep_match:
+        episode_title = ep_match.group(0)
+    else:
+        episode_title = clean_text(raw_page_title.split("|")[0].split("-")[0])
+
+    print(f"    📺 تم العثور على حلقة: {episode_title}")
+
+    # استخراج اسم المسلسل الحقيقي بدقة من داخل عناصر الصفحة
+    series_name = ""
+    try:
+        series_name = page.evaluate("""() => {
+            const breadcrumb = document.querySelector('ul.breadcrumb, .series-title, h1 a, .entry-title a');
+            if (breadcrumb) return breadcrumb.innerText.trim();
+            const headerEl = document.querySelector('h1, h2');
+            return headerEl ? headerEl.innerText.trim() : "";
+        }""")
+    except Exception:
+        pass
+
+    if not series_name or len(series_name) < 2:
+        temp_name = raw_page_title
+        for keyword in ["الموسم", "الحلقة", "مترجم", "مدبلج", "مشاهدة", "مسلسل", "اكوام", "Akwam", "|", "-"]:
+            if keyword in temp_name:
+                temp_name = temp_name.split(keyword)[0]
+        series_name = clean_text(temp_name)
+
+    if not series_name or len(series_name) < 2:
+        series_name = "Fightland"
+
+    print(f"    📌 اسم المسلسل المُستخرج للربط: {series_name}")
+
+    series_id = None
+    try:
+        existing_series = supabase.table("tv_series").select("id, title").ilike("title", f"%{series_name}%").execute()
+        if existing_series.data:
+            series_id = existing_series.data[0]["id"]
+            series_name = existing_series.data[0]["title"]
+        else:
+            poster = get_tmdb_poster(series_name)
+            description = "غير متوفر"
+            try:
+                desc_text = page.evaluate("""() => {
+                    const el = document.querySelector('.story, .text-white, article p');
+                    return el ? el.innerText.trim() : "غير متوفر";
+                }""")
+                if desc_text and len(desc_text) > 5:
+                    description = desc_text
+            except Exception:
+                pass
+
+            new_series_data = {
+                "title": series_name,
+                "poster_url": poster,
+                "description": description,
+                "category_type": "مسلسلات اجنبي"
+            }
+            res = supabase.table("tv_series").insert(new_series_data).execute()
+            if res.data:
+                series_id = res.data[0]["id"]
+    except Exception as e:
+        print(f"    ⚠️ خطأ في معالجة جدول tv_series للمسلسل ({series_name}): {e}")
+        return
+
+    if not series_id:
+        print(f"    ❌ لم يتم الحصول على معرف المسلسل (series_id)، تم تخطي الحلقة.")
+        return
+
+    try:
+        existing_ep = supabase.table("episodes_cima").select("id").eq("title", episode_title).eq("series_id", series_id).execute()
+        if existing_ep.data:
+            print(f"    ⏭️ هذه الحلقة موجودة مسبقاً ومتربطة بالمسلسل. تم التخطّي.")
+            return
+    except Exception:
+        pass
+
+    extracted_streaming_links = fetch_streaming_links_with_clicking(page, item_page_url)
+    final_watch_url = extracted_streaming_links[0] if extracted_streaming_links else None
+    extracted_download_links = fetch_download_links_only(page, item_page_url)
+
+    direct_links_json = {
+        "streaming_links": extracted_streaming_links,
+        "download_links": extracted_download_links
+    }
+
+    episode_data = {
+        "series_id": series_id,
+        "title": episode_title,
+        "watch_url": final_watch_url,
+        "direct_links": direct_links_json
+    }
+
+    try:
+        supabase.table("episodes_cima").insert(episode_data).execute()
+        print(f"    ✅ [تم حفظ الحلقة وربطها بالمسلسل ({series_name}) بنجاح]: {episode_title}")
+    except Exception as e:
+        print(f"    ❌ خطأ أثناء حفظ الحلقة ({episode_title}): {e}")
+
+def scrape_section(page, base_category_url, section_type):
+    print(f"\n🚀 بدء سحب القسم من الرابط: {base_category_url}")
+    page_number = 1
+    
+    while True:
+        if page_number == 1:
+            current_page_url = f"{base_category_url}/"
+        else:
+            current_page_url = f"{base_category_url}/page/{page_number}/"
             
-            page_number = 1
-            while True:
-                url = f"{base_url}/page/{page_number}/" if page_number > 1 else f"{base_url}/"
-                print(f"\n📄 جاري فحص الصفحة [{page_number}]...")
-                
-                try:
-                    response = page.goto(url, wait_until="domcontentloaded", timeout=30000)
-                    if response and response.status == 404:
-                        print(f"🏁 وصلت لنهاية قسم {cat_type}.")
-                        break
+        print(f"\n📂 جاري فحص الصفحة رقم [{page_number}] | الرابط: {current_page_url}")
+        
+        try:
+            response = page.goto(current_page_url, wait_until="domcontentloaded", timeout=30000)
+            
+            if response and response.status == 404:
+                print(f"🏁 وصلنا إلى نهاية الصفحات (خطأ 404). تم الانتهاء من هذا القسم!")
+                break
 
-                    time.sleep(2)
-                    movie_links = page.evaluate("""() => {
-                        return [...new Set(Array.from(document.querySelectorAll('a')).map(a => a.href).filter(h => {
-                            if (!h || !h.includes('akwams.org') || h.includes('/category/') || h.includes('/page/') || h.includes('/tag/')) return false;
-                            const parts = h.split('/').filter(Boolean);
-                            return parts.length >= 3 && parts[parts.length - 1].length > 5;
-                        }))];
-                    }""")
-                    
-                    if not movie_links:
-                        print("⚠️ لم يتم العثور على روابط أفلام في هذه الصفحة.")
-                        break
-                    
-                    for link in movie_links:
-                        process_movie(page, link, cat_type)
-                    
-                    page_number += 1
-                except Exception as e:
-                    print(f"⚠️ خطأ أثناء قراءة الصفحة {page_number}: {e}")
-                    page_number += 1
-                    continue
+            time.sleep(2)
+            
+            item_links = page.evaluate("""() => {
+                const anchors = Array.from(document.querySelectorAll('a'));
+                const links = anchors.map(a => a.href).filter(h => {
+                    if (!h || !h.includes('akwams.org')) return false;
+                    if (h.includes('/category/') || h.includes('/page/') || h.includes('/tag/') || h.includes('/search/') || h.includes('/login') || h.includes('/recent')) return false;
+                    if (h === 'https://akwams.org/' || h === 'https://akwams.org') return false;
+                    const parts = h.split('/').filter(Boolean);
+                    return parts.length >= 3 && parts[parts.length - 1].length > 5;
+                });
+                return [...new Set(links)];
+            }""")
+            
+            if not item_links:
+                print(f"🏁 لا توجد روابط أخرى في الصفحة [{page_number}]. تم الانتهاء!")
+                break
+            
+            print(f"🔗 عُثر على {len(item_links)} رابط في هذه الصفحة...")
+            
+            for index, link in enumerate(item_links, 1):
+                print(f"\n  -- عنصر ({index}/{len(item_links)})")
+                if section_type == "series":
+                    process_series_item(page, link)
+                else:
+                    process_movie_item(page, link, current_page_url)
+            
+            page_number += 1
+            
+        except Exception as e:
+            print(f"⚠️ حدث خطأ عند الصفحة [{page_number}]: {e}")
+            break
+
+def scrape_akwam_site():
+    print("🚀 بدء السكربت لسحب المسلسلات الأجنبية أولاً ثم الأفلام...")
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        context = browser.new_context(
+            user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        )
+        context.route("**/*.{png,jpg,jpeg,gif,webp,svg,woff,woff2,css}", lambda route: route.abort())
+        page = context.new_page()
+        
+        scrape_section(page, "https://akwams.org/category/مسلسلات-اجنبي", "series")
+        scrape_section(page, "https://akwams.org/category/movies", "movies")
 
         browser.close()
+        print("\n🎉 تم الانتهاء من كافة المهام بنجاح تام!")
 
 if __name__ == "__main__":
-    scrape_movies()
+    scrape_akwam_site()
