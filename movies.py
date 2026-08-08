@@ -24,8 +24,11 @@ def clean_text(text):
     return " ".join(text.split()).strip()
 
 def normalize_movie_title(raw_title):
-    name = re.sub(r'^(مشاهدة|تحميل|فيلم)?\s*', '', raw_title).strip()
-    clean_name = re.sub(r'\s*(-|\||مترجم|مدبلج|اكوام|Akwam|اونلاين|بجودة).*', '', name, flags=re.IGNORECASE).strip()
+    # إزالة الكلمات الزائدة من أي مكان في العنوان لتوحيد الاسم تماماً
+    name = re.sub(r'\b(مشاهدة|تحميل|فيلم|اونلاين|مدبلج|مترجم|برابط|مباشر|بجودة|HD|FHD|4K|720p|1080p)\b', '', raw_title, flags=re.IGNORECASE)
+    # إزالة السنوات (مثلاً 2026) والرموز الزائدة
+    name = re.sub(r'\b(19|20)\d{2}\b', '', name)
+    clean_name = re.sub(r'(-|\||–|_|\(|\))', ' ', name)
     clean_name = clean_text(clean_name)
     
     invalid_names = ["جديد", "حصريا", "فيلم"]
@@ -158,7 +161,7 @@ def process_movie_item(page, item_page_url, cat_type):
     if not movie_title:
         return
 
-    # التحقق مسبقاً من قاعدة البيانات هل الفيلم موجود وله روابط؟
+    # التحقق مسبقاً من قاعدة البيانات لتفادي تكرار الفيلم
     try:
         existing_movie = supabase.table("movies_cima").select("watch_url, direct_links").eq("title", movie_title).execute()
         if existing_movie.data:
