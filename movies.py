@@ -54,7 +54,7 @@ def get_best_poster(title):
         
         if clean_name and len(clean_name) >= 2:
             query = urllib.parse.quote(clean_name)
-            url = f"https://api.themoviedb.org/3/search/multi?api_key=3f4534f3c7e1451f28b49231f47d3c3d&query={query}&language=ar"
+            url = f"https://api.themoviedb.org/3/search/multi?api_key=cebc63c38c381423c4ba63134d073a93&query={query}&language=ar"
             req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
             
             with urllib.request.urlopen(req, timeout=5) as response:
