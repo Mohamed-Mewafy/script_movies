@@ -46,45 +46,46 @@ def shorten_link_via_shrinkme(original_url):
         pass
     return original_url
 
-def get_poster_from_akwam_or_tmdb(page, title):
-    # 1. محاولة استخراج بوستر الفيلم من موقع أكوام نفسه أولاً
+def get_best_poster(page, title):
+    # 1. البحث مباشرة عن صور الرفع الخاصة بأكوام داخل الصفحة (wp-content/uploads)
     try:
         poster = page.evaluate("""() => {
             let metaImg = document.querySelector('meta[property="og:image"]');
-            if (metaImg && metaImg.content && !metaImg.content.includes('default')) return metaImg.content;
+            if (metaImg && metaImg.content && metaImg.content.includes('wp-content/uploads')) {
+                return metaImg.content;
+            }
             
-            // البحث عن صور الغلاف الشائعة في أكوام
-            const el = document.querySelector('.entry-image img, .poster img, .movie-poster img, .media-image img, .box img, img[class*="poster"], img[class*="image"]');
-            if (el) {
-                let src = el.src || el.getAttribute('data-src') || el.getAttribute('data-lazy-src');
-                if (src && !src.includes('default')) return src;
+            const imgs = Array.from(document.querySelectorAll('img'));
+            for (let img of imgs) {
+                let src = img.src || img.getAttribute('data-src') || img.getAttribute('data-lazy-src');
+                if (src && src.includes('wp-content/uploads') && !src.includes('logo') && !src.includes('default')) {
+                    return src;
+                }
             }
             return null;
         }""")
         
-        if poster and poster != "غير متوفر" and poster.startswith("http"):
+        if poster and poster != "غير متوفر":
             return poster
     except Exception:
         pass
 
-    # 2. إذا لم يجد السكربت البوستر في أكوام، يبحث عنه عبر TMDB كبديل
+    # 2. إذا لم يتم العثور عليها في أكوام، يتم استخدام TMDB كخطة بديلة
     try:
         clean_name = re.sub(r'[\d\-\_\:\,\.\(\)]', ' ', title)
         clean_name = clean_text(clean_name)
-        if not clean_name or len(clean_name) < 2:
-            return "غير متوفر"
+        if clean_name and len(clean_name) >= 2:
+            query = urllib.parse.quote(clean_name)
+            url = f"https://api.themoviedb.org/3/search/multi?api_key=3f4534f3c7e1451f28b49231f47d3c3d&query={query}&language=ar"
+            req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
             
-        query = urllib.parse.quote(clean_name)
-        url = f"https://api.themoviedb.org/3/search/multi?api_key=3f4534f3c7e1451f28b49231f47d3c3d&query={query}&language=ar"
-        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-        
-        with urllib.request.urlopen(req, timeout=5) as response:
-            data = json.loads(response.read().decode())
-            results = data.get("results", [])
-            for res in results:
-                poster_path = res.get("poster_path")
-                if poster_path:
-                    return f"https://image.tmdb.org/t/p/w500{poster_path}"
+            with urllib.request.urlopen(req, timeout=5) as response:
+                data = json.loads(response.read().decode())
+                results = data.get("results", [])
+                for res in results:
+                    poster_path = res.get("poster_path")
+                    if poster_path:
+                        return f"https://image.tmdb.org/t/p/w500{poster_path}"
     except Exception:
         pass
         
@@ -230,7 +231,7 @@ def process_movie_item(page, item_page_url, current_cat_url):
 
         is_downloads_empty = not existing_downloads or len(existing_downloads) == 0
         is_streaming_empty = not existing_streaming or len(existing_streaming) <= 1
-        is_poster_missing = not current_poster or current_poster == "غير متوفر"
+        is_poster_missing = not current_poster or current_poster == "غير متوفر" or "akwams" in current_poster
 
         if not is_downloads_empty and not is_streaming_empty and not is_poster_missing:
             print(f"    ⏭️ الفيلم موجود ولديه روابط كاملة وبوستر صحيح. تم التخطّي.")
@@ -240,8 +241,8 @@ def process_movie_item(page, item_page_url, current_cat_url):
         updates_payload = {}
 
         if is_poster_missing:
-            print(f"    ⚠️ البوستر غير متوفر، جاري إعادة جلبه...")
-            new_poster = get_poster_from_akwam_or_tmdb(page, title)
+            print(f"    ⚠️ البوستر غير متوفر أو يحمل شعار الموقع، جاري تحديثه...")
+            new_poster = get_best_poster(page, title)
             if new_poster and new_poster != "غير متوفر":
                 updates_payload["poster_url"] = new_poster
                 updated_needed = True
@@ -293,7 +294,7 @@ def process_movie_item(page, item_page_url, current_cat_url):
             except Exception:
                 pass
 
-        poster = get_poster_from_akwam_or_tmdb(page, title)
+        poster = get_best_poster(page, title)
 
         description = "غير متوفر"
         try:
@@ -346,7 +347,7 @@ def process_movie_item(page, item_page_url, current_cat_url):
             print(f"    ❌ خطأ أثناء حفظ الفيلم الجديد ({title}): {e}")
 
 def scrape_akwam_site():
-    print("🚀 بدء السكربت لتفليش وسحب السيرفرات والبوسترات والتحميل لكل الأفلام...")
+    print("🚀 بدء السكربت لتفليش وسحب السيرفرات والبوسترات والتحميل (البداية بالأفلام العربية)...")
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         context = browser.new_context(
@@ -355,7 +356,8 @@ def scrape_akwam_site():
         context.route("**/*.{png,jpg,jpeg,gif,webp,svg,woff,woff2,css}", lambda route: route.abort())
         page = context.new_page()
         
-        base_category_url = "https://akwams.org/category/movies"
+        # البدء بقسم الأفلام العربية أولاً
+        base_category_url = "https://akwams.org/category/movies/arabic"
         page_number = 1
         
         while True:
@@ -364,13 +366,13 @@ def scrape_akwam_site():
             else:
                 current_page_url = f"{base_category_url}/page/{page_number}/"
                 
-            print(f"\n📂 جاري فحص الصفحة رقم [{page_number}] | الرابط: {current_page_url}")
+            print(f"\n📂 جاري فحص صفحة الأفلام العربية رقم [{page_number}] | الرابط: {current_page_url}")
             
             try:
                 response = page.goto(current_page_url, wait_until="domcontentloaded", timeout=30000)
                 
                 if response and response.status == 404:
-                    print(f"🏁 وصلنا إلى نهاية الصفحات (خطأ 404). تم الانتهاء تماماً!")
+                    print(f"🏁 وصلنا إلى نهاية صفحة الأفلام العربية (خطأ 404).")
                     break
 
                 time.sleep(2)
@@ -388,13 +390,13 @@ def scrape_akwam_site():
                 }""")
                 
                 if not item_links:
-                    print(f"🏁 لا توجد روابط أخرى في الصفحة [{page_number}]. تم الانتهاء!")
+                    print(f"🏁 لا توجد روابط أخرى في الصفحة [{page_number}].")
                     break
                 
-                print(f"🔗 عُثر على {len(item_links)} رابط فيلم في هذه الصفحة...")
+                print(f"🔗 عُثر على {len(item_links)} رابط فيلم عربي في هذه الصفحة...")
                 
                 for index, link in enumerate(item_links, 1):
-                    print(f"\n  -- فيلم ({index}/{len(item_links)})")
+                    print(f"\n  -- فيلم عربي ({index}/{len(item_links)})")
                     process_movie_item(page, link, current_page_url)
                 
                 page_number += 1
