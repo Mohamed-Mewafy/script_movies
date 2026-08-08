@@ -47,30 +47,36 @@ def shorten_link_via_shrinkme(original_url):
     return original_url
 
 def get_best_poster(page, title):
-    # 1. البحث مباشرة عن صور الرفع الخاصة بأكوام داخل الصفحة (wp-content/uploads)
+    # 1. البحث الدقيق عن روابط البوسترات داخل الصفحة والـ Meta Tags
     try:
         poster = page.evaluate("""() => {
             let metaImg = document.querySelector('meta[property="og:image"]');
-            if (metaImg && metaImg.content && metaImg.content.includes('wp-content/uploads')) {
+            if (metaImg && metaImg.content) {
                 return metaImg.content;
+            }
+            
+            let posterEl = document.querySelector('.poster img, .movie-poster img, .entry-image img, div[class*="poster"] img, .card-img-top');
+            if (posterEl) {
+                let src = posterEl.src || posterEl.getAttribute('data-src') || posterEl.getAttribute('data-lazy-src') || posterEl.getAttribute('srcset');
+                if (src) return src.split(' ')[0];
             }
             
             const imgs = Array.from(document.querySelectorAll('img'));
             for (let img of imgs) {
                 let src = img.src || img.getAttribute('data-src') || img.getAttribute('data-lazy-src');
-                if (src && src.includes('wp-content/uploads') && !src.includes('logo') && !src.includes('default')) {
+                if (src && !src.includes('logo') && !src.includes('default') && !src.includes('icon') && (src.includes('uploads') || src.includes('poster') || src.includes('image'))) {
                     return src;
                 }
             }
             return null;
         }""")
         
-        if poster and poster != "غير متوفر":
+        if poster and poster != "غير متوفر" and not poster.startswith("chrome-error"):
             return poster
     except Exception:
         pass
 
-    # 2. إذا لم يتم العثور عليها في أكوام، يتم استخدام TMDB كخطة بديلة
+    # 2. إذا لم يتم العثور عليها، يتم استخدام TMDB كخطة بديلة
     try:
         clean_name = re.sub(r'[\d\-\_\:\,\.\(\)]', ' ', title)
         clean_name = clean_text(clean_name)
@@ -353,7 +359,8 @@ def scrape_akwam_site():
         context = browser.new_context(
             user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
         )
-        context.route("**/*.{png,jpg,jpeg,gif,webp,svg,woff,woff2,css}", lambda route: route.abort())
+        # تم استبعاد الصور من الحظر لضمان قدرة الصفحة على جلب الروابط بشكل سليم
+        context.route("**/*.{woff,woff2,css}", lambda route: route.abort())
         page = context.new_page()
         
         base_category_url = "https://akwams.org/category/movies"
