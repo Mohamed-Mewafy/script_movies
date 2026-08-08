@@ -48,13 +48,16 @@ def shorten_link_via_shrinkme(original_url):
 
 def get_tmdb_poster(title):
     try:
+        # تنظيف العنوان تماماً من أي رموز أو كلمات زائدة للبحث بدقة
         clean_name = re.sub(r'[\d\-\_\:\,\.\(\)]', ' ', title)
         clean_name = clean_text(clean_name)
         if not clean_name or len(clean_name) < 2:
             return "غير متوفر"
+            
         query = urllib.parse.quote(clean_name)
         url = f"https://api.themoviedb.org/3/search/multi?api_key=3f4534f3c7e1451f28b49231f47d3c3d&query={query}&language=ar"
         req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+        
         with urllib.request.urlopen(req, timeout=5) as response:
             data = json.loads(response.read().decode())
             results = data.get("results", [])
@@ -319,7 +322,6 @@ def process_movie_item(page, item_page_url, current_cat_url):
         }
 
         try:
-            # استخدام upsert مع تحديد on_conflict لتجنب أخطاء تكرار الـ Unique Constraint
             supabase.table("movies_cima").upsert(formatted_movie, on_conflict="title").execute()
             print(f"    ✅ [تم حفظ أو تحديث الفيلم بكامل روابطه بنجاح]: {title}")
         except Exception as e:
