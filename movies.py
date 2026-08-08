@@ -173,19 +173,64 @@ def process_movie_item(page, item_page_url):
 
     print(f"    🎬 فيلم: {title}")
 
-    # 1. الاستعلام عن الفيلم مع جلب الروابط والبوستر للتأكد منهم
-    existing = supabase.table("movies_cima").select("id, watch_url, direct_links, poster_url").eq("title", title).execute()
+    # 1. الاستعلام عن الفيلم للتأكد من وجوده مسبقاً
+    existing = supabase.table("movies_cima").select("id, watch_url, direct_links").eq("title", title).execute()
 
-    # 2. سحب البوستر الذكي من الصفحة
+    if existing.data:
+        movie_record = existing.data[0]
+        watch_url = movie_record.get("watch_url")
+        direct_links = movie_record.get("direct_links") or {}
+        
+        streaming_links = direct_links.get("streaming_links", [])
+        download_links = direct_links.get("download_links", [])
+
+        has_watch = bool(watch_url) or bool(streaming_links)
+        has_download = bool(download_links)
+
+        if has_watch and has_download:
+            print(f"    ⏭️ الفيلم وروابطه موجودة مسبقاً. تم التخطّي.")
+            return
+
+    # 2. سحب الروابط فقط للفيلم
+    extracted_streaming_links = fetch_streaming_links_with_clicking(page, item_page_url)
+    final_watch_url = extracted_streaming_links[0] if extracted_streaming_links else None
+    extracted_download_links = fetch_download_links_only(page, item_page_url)
+
+    direct_links_json = {
+        "streaming_links": extracted_streaming_links,
+        "download_links": extracted_download_links
+    }
+
+    # 3. إذا كان الفيلم موجوداً والروابط ناقصة -> تحديث الروابط فقط بدون تعديل البوستر
+    if existing.data:
+        movie_id = existing.data[0]["id"]
+        update_data = {
+            "watch_url": final_watch_url or existing.data[0].get("watch_url"),
+            "direct_links": direct_links_json
+        }
+        try:
+            supabase.table("movies_cima").update(update_data).eq("id", movie_id).execute()
+            print(f"    ✅ [تم تحديث روابط الفيلم فقط بنجاح]")
+        except Exception as e:
+            print(f"    ❌ خطأ أثناء تحديث روابط الفيلم: {e}")
+        return
+
+    # 4. الفيلم جديد تماماً -> سحب البوستر وإضافة الفيلم لأول مرة
+    year = None
+    match = re.search(r'20\d{2}|19\d{2}', title)
+    if match:
+        try:
+            year = int(match.group(0))
+        except Exception:
+            pass
+
     poster = "غير متوفر"
     try:
         poster = page.evaluate("""() => {
-            // 1. فحص ميتا og:image
             let metaImg = document.querySelector('meta[property="og:image"]');
             if (metaImg && metaImg.content && metaImg.content.trim() !== "") {
                 return new URL(metaImg.content, window.location.href).href;
             }
-            // 2. فحص عناصر الصور الخاصة بموقع أكوام
             const el = document.querySelector('.picture img, .poster img, .entry-image img, .box-poster img, main img');
             if (el) {
                 let src = el.getAttribute('data-src') || el.getAttribute('src') || el.src;
@@ -200,47 +245,6 @@ def process_movie_item(page, item_page_url):
 
     if poster == "غير متوفر" or not poster.startswith("http"):
         poster = get_tmdb_poster(title)
-
-    # 3. سحب الروابط من الصفحة
-    extracted_streaming_links = fetch_streaming_links_with_clicking(page, item_page_url)
-    final_watch_url = extracted_streaming_links[0] if extracted_streaming_links else None
-    extracted_download_links = fetch_download_links_only(page, item_page_url)
-
-    direct_links_json = {
-        "streaming_links": extracted_streaming_links,
-        "download_links": extracted_download_links
-    }
-
-    # 4. تحديث الفيلم إذا كان موجوداً مسبقاً (تحديث الروابط والبوستر إن كان ناقصاً)
-    if existing.data:
-        movie_record = existing.data[0]
-        movie_id = movie_record["id"]
-        db_poster = movie_record.get("poster_url")
-
-        update_data = {
-            "watch_url": final_watch_url or movie_record.get("watch_url"),
-            "direct_links": direct_links_json
-        }
-
-        # إذا كان البوستر في قاعدة البيانات غير متوفر وتم إيجاد بوستر جديد، نقوم بتحديثه
-        if (not db_poster or db_poster == "غير متوفر" or not db_poster.startswith("http")) and poster.startswith("http"):
-            update_data["poster_url"] = poster
-
-        try:
-            supabase.table("movies_cima").update(update_data).eq("id", movie_id).execute()
-            print(f"    🔄 [تم تحديث بيانات الفيلم والبوستر بنجاح]")
-        except Exception as e:
-            print(f"    ❌ خطأ أثناء تحديث الفيلم: {e}")
-        return
-
-    # 5. إضافة الفيلم كعنصر جديد
-    year = None
-    match = re.search(r'20\d{2}|19\d{2}', title)
-    if match:
-        try:
-            year = int(match.group(0))
-        except Exception:
-            pass
 
     formatted_movie = {
         "title": title,
