@@ -7,10 +7,19 @@ import json
 import requests
 from playwright.sync_api import sync_playwright
 from supabase import create_client, Client
+import cloudinary
+import cloudinary.uploader
 
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
 SHRINKME_API_TOKEN = os.environ.get("SHRINKME_API_TOKEN")
+
+# إعدادات Cloudinary
+cloudinary.config(
+    cloud_name = os.environ.get("CLOUDINARY_CLOUD_NAME",),
+    api_key = os.environ.get("CLOUDINARY_API_KEY"),
+    api_secret = os.environ.get("CLOUDINARY_API_SECRET")
+)
 
 if not SUPABASE_URL or not SUPABASE_KEY:
     raise ValueError("⚠️ تنبيه: يرجى التأكد من ضبط متغيرات البيئة SUPABASE_URL و SUPABASE_KEY بشكل صحيح.")
@@ -28,6 +37,23 @@ def clean_title(raw_title):
     title = title.replace("مترجم", "").replace("مدبلج", "").replace("اكوام", "").replace("Akwam", "")
     title = title.split("|")[0].split("-")[0]
     return clean_text(title)
+
+def get_optimized_image_url(original_url):
+    if not original_url or original_url == "غير متوفر":
+        return original_url
+    if "cloudinary.com" in original_url:
+        return original_url
+    try:
+        upload_result = cloudinary.uploader.upload(
+            original_url,
+            folder="cimaspace_posters",
+            fetch_format="auto",
+            quality="auto"
+        )
+        return upload_result.get('secure_url', original_url)
+    except Exception as e:
+        print(f"    ⚠️ خطأ أثناء رفع وتحويل الصورة إلى Cloudinary: {e}")
+        return original_url
 
 def shorten_link_via_shrinkme(original_url):
     if not original_url:
@@ -215,7 +241,7 @@ def process_movie_item(page, item_page_url):
             print(f"    ❌ خطأ أثناء تحديث روابط الفيلم: {e}")
         return
 
-    # 4. الفيلم جديد تماماً -> سحب البوستر وإضافة الفيلم لأول مرة
+    # 4. الفيلم جديد تماماً -> سحب البوستر، رفعه وتحويله لـ Cloudinary، ثم إضافة الفيلم لأول مرة
     year = None
     match = re.search(r'20\d{2}|19\d{2}', title)
     if match:
@@ -246,18 +272,21 @@ def process_movie_item(page, item_page_url):
     if poster == "غير متوفر" or not poster.startswith("http"):
         poster = get_tmdb_poster(title)
 
+    # تحسين ورفع البوستر مباشرة إلى Cloudinary قبل الحفظ في سوبابيز
+    optimized_poster_url = get_optimized_image_url(poster)
+
     formatted_movie = {
         "title": title,
         "category_type": "افلام اجنبي",
         "year": year,
-        "poster_url": poster,
+        "poster_url": optimized_poster_url,
         "watch_url": final_watch_url,
         "direct_links": direct_links_json
     }
 
     try:
         supabase.table("movies_cima").insert(formatted_movie).execute()
-        print(f"    ✅ [تم حفظ الفيلم الجديد مع البوستر بنجاح]")
+        print(f"    ✅ [تم حفظ الفيلم الجديد مع البوستر المحسن على Cloudinary بنجاح]")
     except Exception as e:
         print(f"    ❌ خطأ أثناء حفظ الفيلم: {e}")
 
