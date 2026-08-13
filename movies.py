@@ -347,7 +347,7 @@ def scrape_akwam_site():
     
     # قائمة بجميع أقسام الأفلام المطلوبة لل المرور عليها بالترتيب
     category_urls = [
-        "https://akwams.org/category/movies",
+        #"https://akwams.org/category/movies",
         "https://akwams.org/category/افلام-عربي",
         "https://akwams.org/category/افلام-اسيوية",
         "https://akwams.org/category/افلام-انمي",
