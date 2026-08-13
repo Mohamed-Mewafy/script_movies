@@ -291,7 +291,7 @@ def process_movie_item(page, item_page_url):
         print(f"    ❌ خطأ أثناء حفظ الفيلم: {e}")
 
 def scrape_section(page, base_category_url):
-    print(f"\n🚀 بدء سحب قسم الأفلام بلا حدود: {base_category_url}")
+    print(f"\n🚀 بدء سحب القسم بلا حدود: {base_category_url}")
     page_number = 1
     global_processed_links = set()
     
@@ -344,6 +344,13 @@ def scrape_section(page, base_category_url):
 
 def scrape_akwam_site():
     print("🚀 بدء تشغيل السكربت لسحب الأفلام...")
+    
+    # قائمة الأقسام المراد سحبها بالترتيب
+    category_urls = [
+        "https://akwams.org/category/movies",       # الأفلام الأجنبية
+        "https://akwams.org/category/movies-arabic" # الأفلام العربية (أو أي روابط أقسام أخرى تريد إضافتها)
+    ]
+
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         context = browser.new_context(
@@ -352,11 +359,12 @@ def scrape_akwam_site():
         context.route("**/*.{png,jpg,jpeg,gif,webp,svg,woff,woff2,css}", lambda route: route.abort())
         page = context.new_page()
         
-        # سحب قسم الأفلام فقط
-        scrape_section(page, "https://akwams.org/category/movies")
+        # حلقة تكرار للذهاب للقسْم التالي تلقائياً بعد انتهاء القسم الحالي
+        for url in category_urls:
+            scrape_section(page, url)
 
         browser.close()
-        print("\n🎉 تم الانتهاء من سحب كافة الأفلام بنجاح!")
+        print("\n🎉 تم الانتهاء من سحب كافة الأقسام والأفلام بنجاح!")
 
 if __name__ == "__main__":
     scrape_akwam_site()
