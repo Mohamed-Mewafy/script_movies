@@ -345,10 +345,15 @@ def scrape_section(page, base_category_url):
 def scrape_akwam_site():
     print("🚀 بدء تشغيل السكربت لسحب الأفلام...")
     
-    # قائمة الأقسام المراد سحبها بالترتيب
+    # قائمة بجميع أقسام الأفلام المطلوبة لل المرور عليها بالترتيب
     category_urls = [
-        "https://akwams.org/category/movies",       # الأفلام الأجنبية
-        "https://akwams.org/category/movies-arabic" # الأفلام العربية (أو أي روابط أقسام أخرى تريد إضافتها)
+        "https://akwams.org/category/movies",
+        "https://akwams.org/category/افلام-عربي",
+        "https://akwams.org/category/افلام-اسيوية",
+        "https://akwams.org/category/افلام-انمي",
+        "https://akwams.org/category/افلام-تركية",
+        "https://akwams.org/category/افلام-هندية",
+        "https://akwams.org/category/افلام-وثائقية"
     ]
 
     with sync_playwright() as p:
@@ -359,7 +364,7 @@ def scrape_akwam_site():
         context.route("**/*.{png,jpg,jpeg,gif,webp,svg,woff,woff2,css}", lambda route: route.abort())
         page = context.new_page()
         
-        # حلقة تكرار للذهاب للقسْم التالي تلقائياً بعد انتهاء القسم الحالي
+        # حلقة تكرار للذهاب للقسم التالي تلقائياً بعد انتهاء القسم الحالي
         for url in category_urls:
             scrape_section(page, url)
 
