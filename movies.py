@@ -348,6 +348,7 @@ def scrape_akwam_site():
     print("🚀 بدء تشغيل السكربت لسحب الأفلام...")
     
     category_urls = [
+         "https://akwams.org/category/افلام-اجنبي",
         "https://akwams.org/category/افلام-عربي",
         "https://akwams.org/category/افلام-اسيوية",
         "https://akwams.org/category/افلام-انمي",
