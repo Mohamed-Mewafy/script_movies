@@ -16,7 +16,7 @@ SHRINKME_API_TOKEN = os.environ.get("SHRINKME_API_TOKEN")
 
 # إعدادات Cloudinary
 cloudinary.config(
-    cloud_name = os.environ.get("CLOUDINARY_CLOUD_NAME",),
+    cloud_name = os.environ.get("CLOUDINARY_CLOUD_NAME"),
     api_key = os.environ.get("CLOUDINARY_API_KEY"),
     api_secret = os.environ.get("CLOUDINARY_API_SECRET")
 )
@@ -38,15 +38,21 @@ def clean_title(raw_title):
     title = title.split("|")[0].split("-")[0]
     return clean_text(title)
 
-def get_optimized_image_url(original_url):
+def get_optimized_image_url(original_url, movie_title):
     if not original_url or original_url == "غير متوفر":
         return original_url
     if "cloudinary.com" in original_url:
         return original_url
     try:
+        # تحويل عنوان الفيلم ليكون صالحاً كمعرف ثابت لمنع تكرار الصور
+        safe_title = re.sub(r'[\s\-\_\:\,\.\(\)]+', '_', movie_title).strip('_').lower()
+        public_id = f"cimaspace_posters/{safe_title}"
+
         upload_result = cloudinary.uploader.upload(
             original_url,
-            folder="cimaspace_posters",
+            public_id=public_id,
+            overwrite=True,
+            invalidate=True,
             fetch_format="auto",
             quality="auto"
         )
@@ -199,7 +205,6 @@ def process_movie_item(page, item_page_url):
 
     print(f"    🎬 فيلم: {title}")
 
-    # 1. الاستعلام عن الفيلم للتأكد من وجوده مسبقاً
     existing = supabase.table("movies_cima").select("id, watch_url, direct_links").eq("title", title).execute()
 
     if existing.data:
@@ -217,7 +222,6 @@ def process_movie_item(page, item_page_url):
             print(f"    ⏭️ الفيلم وروابطه موجودة مسبقاً. تم التخطّي.")
             return
 
-    # 2. سحب الروابط فقط للفيلم
     extracted_streaming_links = fetch_streaming_links_with_clicking(page, item_page_url)
     final_watch_url = extracted_streaming_links[0] if extracted_streaming_links else None
     extracted_download_links = fetch_download_links_only(page, item_page_url)
@@ -227,7 +231,6 @@ def process_movie_item(page, item_page_url):
         "download_links": extracted_download_links
     }
 
-    # 3. إذا كان الفيلم موجوداً والروابط ناقصة -> تحديث الروابط فقط بدون تعديل البوستر
     if existing.data:
         movie_id = existing.data[0]["id"]
         update_data = {
@@ -241,7 +244,6 @@ def process_movie_item(page, item_page_url):
             print(f"    ❌ خطأ أثناء تحديث روابط الفيلم: {e}")
         return
 
-    # 4. الفيلم جديد تماماً -> سحب البوستر، رفعه وتحويله لـ Cloudinary، ثم إضافة الفيلم لأول مرة
     year = None
     match = re.search(r'20\d{2}|19\d{2}', title)
     if match:
@@ -272,8 +274,8 @@ def process_movie_item(page, item_page_url):
     if poster == "غير متوفر" or not poster.startswith("http"):
         poster = get_tmdb_poster(title)
 
-    # تحسين ورفع البوستر مباشرة إلى Cloudinary قبل الحفظ في سوبابيز
-    optimized_poster_url = get_optimized_image_url(poster)
+    # تمرير اسم الفيلم لضمان استبدال الصورة القديمة وعدم تكرارها
+    optimized_poster_url = get_optimized_image_url(poster, title)
 
     formatted_movie = {
         "title": title,
@@ -345,9 +347,7 @@ def scrape_section(page, base_category_url):
 def scrape_akwam_site():
     print("🚀 بدء تشغيل السكربت لسحب الأفلام...")
     
-    # قائمة بجميع أقسام الأفلام المطلوبة لل المرور عليها بالترتيب
     category_urls = [
-        #"https://akwams.org/category/movies",
         "https://akwams.org/category/افلام-عربي",
         "https://akwams.org/category/افلام-اسيوية",
         "https://akwams.org/category/افلام-انمي",
@@ -364,7 +364,6 @@ def scrape_akwam_site():
         context.route("**/*.{png,jpg,jpeg,gif,webp,svg,woff,woff2,css}", lambda route: route.abort())
         page = context.new_page()
         
-        # حلقة تكرار للذهاب للقسم التالي تلقائياً بعد انتهاء القسم الحالي
         for url in category_urls:
             scrape_section(page, url)
 
